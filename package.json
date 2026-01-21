@@ -1,0 +1,22 @@
+{
+  "name": "blockchain-cctv",
+  "version": "1.0.0",
+  "description": "Blockchain-based CCTV evidence verification system - Smart Contract Layer",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:gas": "REPORT_GAS=true hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat ignition deploy ./ignition/modules/EvidenceLog.ts --network localhost",
+    "console": "hardhat console --network localhost",
+    "clean": "hardhat clean"
+  },
+  "keywords": ["blockchain", "cctv", "evidence", "ethereum", "solidity"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "hardhat": "^2.28.3"
+  }
+}

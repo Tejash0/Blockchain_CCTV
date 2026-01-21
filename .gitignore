@@ -1,0 +1,30 @@
+node_modules
+c_refrences
+.claude
+.env
+
+# Hardhat files
+cache/
+artifacts/
+
+# TypeChain files
+typechain/
+typechain-types/
+
+# solidity-coverage files
+coverage/
+coverage.json
+
+# Hardhat Ignition default folder for deployments against a local node
+ignition/deployments/
+
+# Backend
+backend/node_modules/
+backend/.env
+backend/database/*.db
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
