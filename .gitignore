@@ -2,7 +2,7 @@ node_modules
 c_refrences
 .claude
 .env
-
+CLAUDE.md
 # Hardhat files
 cache/
 artifacts/
