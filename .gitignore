@@ -28,3 +28,12 @@ backend/uploads/*
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# AI Service
+ai-service/venv/
+ai-service/.env
+ai-service/recordings/*.mp4
+ai-service/__pycache__/
+ai-service/app/__pycache__/
+ai-service/app/**/__pycache__/
+*.pyc
