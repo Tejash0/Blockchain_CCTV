@@ -22,8 +22,14 @@ ignition/deployments/
 backend/node_modules/
 backend/.env
 backend/database/*.db
+backend/database/*.db-shm
+backend/database/*.db-wal
 backend/uploads/*
 !backend/uploads/.gitkeep
+backend/videos/*.mp4
+backend/videos/*.avi
+backend/videos/*.mkv
+backend/videos/*.mov
 
 # Frontend
 frontend/node_modules/

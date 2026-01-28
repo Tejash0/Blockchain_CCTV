@@ -43,11 +43,28 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Configure multer for file uploads
+// Configure video storage directory
+const VIDEOS_DIR = path.resolve(__dirname, 'videos');
+if (!fs.existsSync(VIDEOS_DIR)) {
+  fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+}
+
+// Configure multer for file uploads - save to disk
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, VIDEOS_DIR);
+  },
+  filename: (req, file, cb) => {
+    const timestamp = Date.now();
+    const ext = path.extname(file.originalname) || '.mp4';
+    cb(null, `evidence_${timestamp}${ext}`);
+  }
+});
+
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: storage,
   limits: {
-    fileSize: 100 * 1024 * 1024 // 100MB limit
+    fileSize: 500 * 1024 * 1024 // 500MB limit
   }
 });
 
@@ -62,20 +79,35 @@ db.exec(`
     video_hash TEXT NOT NULL UNIQUE,
     camera_id TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    file_path TEXT,
+    file_size INTEGER,
     blockchain_tx TEXT,
     block_number INTEGER,
     uploader TEXT,
+    detection_type TEXT,
     status TEXT CHECK(status IN ('pending', 'confirmed', 'failed')) DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_video_hash ON evidence_log(video_hash);
   CREATE INDEX IF NOT EXISTS idx_status ON evidence_log(status);
+  CREATE INDEX IF NOT EXISTS idx_camera_id ON evidence_log(camera_id);
 `);
+
+// Add new columns if they don't exist (for existing databases)
+try {
+  db.exec(`ALTER TABLE evidence_log ADD COLUMN file_path TEXT`);
+} catch (e) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE evidence_log ADD COLUMN file_size INTEGER`);
+} catch (e) { /* column already exists */ }
+try {
+  db.exec(`ALTER TABLE evidence_log ADD COLUMN detection_type TEXT`);
+} catch (e) { /* column already exists */ }
 
 // Prepared statements
 const insertEvidence = db.prepare(`
-  INSERT INTO evidence_log (video_hash, camera_id, timestamp, status)
-  VALUES (?, ?, ?, 'pending')
+  INSERT INTO evidence_log (video_hash, camera_id, timestamp, file_path, file_size, detection_type, status)
+  VALUES (?, ?, ?, ?, ?, ?, 'pending')
 `);
 
 const updateEvidenceConfirmed = db.prepare(`
@@ -166,11 +198,16 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
       });
     }
 
-    // Calculate hash of the file
-    const videoHash = calculateHash(req.file.buffer);
+    const detectionType = req.body.detectionType || 'manual';
+
+    // Read file from disk and calculate hash
+    const filePath = req.file.path;
+    const fileBuffer = fs.readFileSync(filePath);
+    const videoHash = calculateHash(fileBuffer);
+    const fileSize = req.file.size;
     const timestamp = Math.floor(Date.now() / 1000);
 
-    console.log(`Recording evidence: hash=${videoHash}, cameraId=${cameraId}`);
+    console.log(`Recording evidence: hash=${videoHash}, cameraId=${cameraId}, file=${filePath}`);
 
     // Check if already exists in database
     const existing = getEvidenceByHash.get(videoHash);
@@ -188,9 +225,11 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
 
     // Insert into database with pending status
     try {
-      insertEvidence.run(videoHash, cameraId.trim(), timestamp);
+      insertEvidence.run(videoHash, cameraId.trim(), timestamp, filePath, fileSize, detectionType);
     } catch (dbError) {
       if (dbError.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        // Delete the uploaded file since it's a duplicate
+        fs.unlinkSync(filePath);
         return res.status(409).json({
           success: false,
           error: 'Evidence already exists in database'
@@ -218,10 +257,13 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
       return res.json({
         success: true,
         videoHash,
-        txHash: receipt.hash,
+        transactionHash: receipt.hash,
         blockNumber: receipt.blockNumber,
         cameraId: cameraId.trim(),
-        timestamp
+        timestamp,
+        filePath: filePath,
+        fileSize: fileSize,
+        detectionType: detectionType
       });
 
     } catch (blockchainError) {
@@ -267,9 +309,13 @@ app.post('/api/verify', upload.single('video'), async (req, res) => {
       });
     }
 
-    // Calculate hash of the file
-    const videoHash = calculateHash(req.file.buffer);
+    // Read file from disk and calculate hash
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const videoHash = calculateHash(fileBuffer);
     console.log(`Verifying evidence: hash=${videoHash}`);
+
+    // Delete the uploaded file after hashing (we don't need to keep verification uploads)
+    fs.unlinkSync(req.file.path);
 
     // Level 1: Check SQL cache
     const cachedEvidence = getEvidenceByHash.get(videoHash);
@@ -298,7 +344,7 @@ app.post('/api/verify', upload.single('video'), async (req, res) => {
         // If not in cache, add it
         if (!cachedEvidence) {
           try {
-            insertEvidence.run(videoHash, evidence.cameraId, Number(evidence.timestamp));
+            insertEvidence.run(videoHash, evidence.cameraId, Number(evidence.timestamp), null, null, 'discovered');
             updateEvidenceConfirmed.run(
               null, // No tx hash for discovered evidence
               Number(evidence.blockNumber),
@@ -415,6 +461,9 @@ app.get('/api/logs', async (req, res) => {
           timestamp: r.timestamp,
           uploader: r.uploader,
           blockNumber: r.block_number,
+          filePath: r.file_path,
+          fileSize: r.file_size,
+          detectionType: r.detection_type,
           status: r.status
         }))
       });

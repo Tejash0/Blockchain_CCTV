@@ -64,7 +64,8 @@ class HashUploader:
                     "video": (recording.filepath.name, video_data, "video/mp4")
                 }
                 data = {
-                    "cameraId": recording.camera_id
+                    "cameraId": recording.camera_id,
+                    "detectionType": recording.detection_type
                 }
 
                 # POST to backend
