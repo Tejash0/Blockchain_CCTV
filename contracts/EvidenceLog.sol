@@ -10,7 +10,7 @@ contract EvidenceLog {
     struct Evidence {
         bytes32 videoHash;      // SHA-256 hash of the video file
         string cameraId;        // Unique identifier for the camera
-        uint256 timestamp;      // Unix timestamp when evidence was recorded
+        uint256 timestamp;      // Unix timestamp when footage was hashed (real-time hashing)
         address uploader;       // Address that logged the evidence
         uint256 blockNumber;    // Block number when evidence was logged
         uint256 loggedAt;       // Block timestamp when logged on-chain
@@ -35,7 +35,7 @@ contract EvidenceLog {
      * @dev Logs a new piece of evidence on-chain
      * @param _videoHash SHA-256 hash of the video file (must be unique)
      * @param _cameraId Identifier of the camera that recorded the footage
-     * @param _timestamp Unix timestamp when the footage was recorded
+     * @param _timestamp Unix timestamp when the footage was hashed (real-time)
      */
     function logEvidence(
         bytes32 _videoHash,
@@ -54,8 +54,8 @@ contract EvidenceLog {
         // Ensure camera ID is provided
         require(bytes(_cameraId).length > 0, "Camera ID cannot be empty");
 
-        // Ensure timestamp is valid (not in the future)
-        require(_timestamp <= block.timestamp, "Timestamp cannot be in the future");
+        // Ensure timestamp is valid (positive value)
+        require(_timestamp > 0, "Timestamp must be positive");
 
         // Create and store the evidence record
         evidenceRecords[_videoHash] = Evidence({
@@ -81,12 +81,24 @@ contract EvidenceLog {
     }
 
     /**
-     * @dev Verifies if a video hash exists on-chain
+     * @dev Verifies if a video hash exists on-chain and returns timing details
      * @param _videoHash SHA-256 hash to verify
      * @return exists True if the hash exists, false otherwise
+     * @return timestamp Unix timestamp when the footage was hashed (real-time)
+     * @return loggedAt Block timestamp when evidence was logged on-chain
+     * @return cameraId The camera that recorded the footage
      */
-    function verifyEvidence(bytes32 _videoHash) external view returns (bool exists) {
-        return evidenceRecords[_videoHash].videoHash != bytes32(0);
+    function verifyEvidence(bytes32 _videoHash) external view returns (
+        bool exists,
+        uint256 timestamp,
+        uint256 loggedAt,
+        string memory cameraId
+    ) {
+        Evidence memory evidence = evidenceRecords[_videoHash];
+        if (evidence.videoHash == bytes32(0)) {
+            return (false, 0, 0, "");
+        }
+        return (true, evidence.timestamp, evidence.loggedAt, evidence.cameraId);
     }
 
     /**

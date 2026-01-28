@@ -12,11 +12,20 @@
     "console": "hardhat console --network localhost",
     "clean": "hardhat clean"
   },
-  "keywords": ["blockchain", "cctv", "evidence", "ethereum", "solidity"],
+  "keywords": [
+    "blockchain",
+    "cctv",
+    "evidence",
+    "ethereum",
+    "solidity"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^6.1.0",
     "hardhat": "^2.28.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
   }
 }

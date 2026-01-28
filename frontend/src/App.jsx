@@ -2,6 +2,7 @@ import { Routes, Route, NavLink } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import Record from './pages/Record'
 import Verify from './pages/Verify'
+import Alerts from './pages/Alerts'
 
 function App() {
   return (
@@ -44,6 +45,16 @@ function App() {
               >
                 Verify
               </NavLink>
+              <NavLink
+                to="/alerts"
+                className={({ isActive }) =>
+                  `px-3 py-2 rounded-md text-sm font-medium ${
+                    isActive ? 'bg-gray-900' : 'hover:bg-gray-700'
+                  }`
+                }
+              >
+                AI Alerts
+              </NavLink>
             </div>
           </div>
         </div>
@@ -55,6 +66,7 @@ function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/record" element={<Record />} />
           <Route path="/verify" element={<Verify />} />
+          <Route path="/alerts" element={<Alerts />} />
         </Routes>
       </main>
     </div>
