@@ -6,9 +6,6 @@ import numpy as np
 import cv2
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
-import torch
-import torch.nn as nn
-from torchvision import transforms, models
 import threading
 
 
@@ -33,7 +30,8 @@ class ViolenceDetector:
         self,
         threshold: float = 0.6,
         device: str = "cpu",
-        use_deep_learning: bool = False
+        use_deep_learning: bool = False,
+        model_path: str = "yolov8n.pt"
     ):
         """
         Initialize the violence detector.
@@ -41,11 +39,13 @@ class ViolenceDetector:
         Args:
             threshold: Detection threshold (0-1)
             device: 'cpu' or 'cuda'
-            use_deep_learning: Whether to use CNN-based detection
+            use_deep_learning: Whether to use YOLOv8-based detection
+            model_path: YOLO model weights file (auto-downloaded if not present)
         """
         self.threshold = threshold
         self.device = device
         self.use_deep_learning = use_deep_learning
+        self.model_path = model_path
         self._lock = threading.Lock()
 
         # Motion detection parameters
@@ -59,40 +59,20 @@ class ViolenceDetector:
         self._history_size = 30  # Keep last 30 motion scores
 
         # Deep learning model (optional)
-        self._model: Optional[nn.Module] = None
+        self._model = None
         self._transform = None
 
         if use_deep_learning:
             self._init_deep_model()
 
     def _init_deep_model(self):
-        """Initialize the deep learning model for violence detection."""
+        """Initialize YOLOv8 model for person/object detection."""
         try:
-            # Use a pre-trained ResNet as feature extractor
-            # In production, replace with a violence-specific model
-            self._model = models.resnet18(pretrained=True)
-            self._model.fc = nn.Sequential(
-                nn.Linear(512, 256),
-                nn.ReLU(),
-                nn.Dropout(0.5),
-                nn.Linear(256, 2),  # Violence / No Violence
-                nn.Softmax(dim=1)
-            )
-            self._model = self._model.to(self.device)
-            self._model.eval()
-
-            self._transform = transforms.Compose([
-                transforms.ToPILImage(),
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225]
-                )
-            ])
-            print("Deep learning model initialized")
+            from ultralytics import YOLO
+            self._model = YOLO(self.model_path)  # auto-downloads yolov8n.pt
+            print(f"YOLOv8 model loaded: {self.model_path}")
         except Exception as e:
-            print(f"Could not initialize deep model: {e}")
+            print(f"Could not load YOLO model: {e}")
             self.use_deep_learning = False
 
     def detect(self, frames: np.ndarray) -> DetectionResult:
@@ -222,37 +202,35 @@ class ViolenceDetector:
         return min(1.0, current_motion)
 
     def _deep_learning_detect(self, frame: np.ndarray) -> float:
-        """
-        Use deep learning model for violence detection.
-
-        Args:
-            frame: Single frame (H, W, C)
-
-        Returns:
-            Violence probability (0-1)
-        """
-        if self._model is None or self._transform is None:
+        """Use YOLOv8 to detect persons/suspicious activity."""
+        if self._model is None:
             return 0.0
-
         try:
-            # Preprocess
-            if frame.shape[2] == 3:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            else:
-                frame_rgb = frame
-
-            input_tensor = self._transform(frame_rgb).unsqueeze(0).to(self.device)
-
-            # Inference
-            with torch.no_grad():
-                output = self._model(input_tensor)
-                violence_prob = output[0][1].item()  # Probability of violence class
-
-            return violence_prob
-
+            results = self._model(frame, verbose=False, device=self.device)[0]
+            # Extract person detections (COCO class 0 = person)
+            person_boxes = [b for b in results.boxes if int(b.cls) == 0 and float(b.conf) > 0.4]
+            num_persons = len(person_boxes)
+            if num_persons == 0:
+                return 0.0
+            avg_conf = sum(float(b.conf) for b in person_boxes) / num_persons
+            crowd_score = min(1.0, num_persons / 4)  # 4+ persons = max crowd score
+            proximity_score = self._calc_proximity(person_boxes)
+            return min(1.0, avg_conf * 0.4 + crowd_score * 0.3 + proximity_score * 0.3)
         except Exception as e:
-            print(f"Deep learning detection error: {e}")
+            print(f"YOLO detection error: {e}")
             return 0.0
+
+    def _calc_proximity(self, boxes) -> float:
+        """Score how close detected persons are to each other (0-1)."""
+        if len(boxes) < 2:
+            return 0.0
+        centers = [(float(b.xywh[0][0]), float(b.xywh[0][1])) for b in boxes]
+        min_dist = float('inf')
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                d = ((centers[i][0] - centers[j][0])**2 + (centers[i][1] - centers[j][1])**2)**0.5
+                min_dist = min(min_dist, d)
+        return max(0.0, 1.0 - min_dist / 300)  # <300px apart = high proximity
 
     def reset(self):
         """Reset the detector state."""

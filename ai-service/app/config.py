@@ -3,6 +3,7 @@ Configuration management for AI Crime Detection Service
 """
 import os
 from pathlib import Path
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
 
     # Model settings
     model_device: str = "cpu"  # 'cuda' or 'cpu'
+    yolo_model: str = Field(default="yolov8n.pt", description="YOLO model weights (auto-downloaded)")
 
     # Backend integration
     backend_url: str = "http://localhost:5000"
@@ -32,6 +34,11 @@ class Settings(BaseSettings):
     recordings_dir: Path = Path(__file__).parent.parent / "recordings"
     max_recordings_gb: int = 10
     retention_days: int = 7
+
+    # Gemini VLM (Forensic Report Generation)
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3-flash-preview"
+    enable_forensic_reports: bool = True
 
     # WebSocket
     ws_heartbeat_interval: int = 30

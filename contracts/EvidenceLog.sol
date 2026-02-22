@@ -4,16 +4,23 @@ pragma solidity ^0.8.28;
 /**
  * @title EvidenceLog
  * @dev Stores cryptographic hashes of CCTV video footage for tamper-proof verification
- * @notice This contract provides immutable evidence logging for surveillance systems
+ * @notice Dual-hash verification: SHA-256 (content integrity) + pHash (perceptual similarity)
+ *         with on-chain forensic report hash for VLM-based analysis provenance
  */
 contract EvidenceLog {
     struct Evidence {
-        bytes32 videoHash;      // SHA-256 hash of the video file
-        string cameraId;        // Unique identifier for the camera
-        uint256 timestamp;      // Unix timestamp when footage was hashed (real-time hashing)
-        address uploader;       // Address that logged the evidence
-        uint256 blockNumber;    // Block number when evidence was logged
-        uint256 loggedAt;       // Block timestamp when logged on-chain
+        bytes32 videoHash;        // SHA-256 hash of the video file
+        string cameraId;          // Unique identifier for the camera
+        uint256 timestamp;        // Unix timestamp when footage was hashed
+        address uploader;         // Address that logged the evidence
+        uint256 blockNumber;      // Block number when evidence was logged
+        uint256 loggedAt;         // Block timestamp when logged on-chain
+        bytes32 reportHash;       // SHA-256 of forensic report JSON
+        bytes32 perceptualHash;   // pHash of video (perceptual hash)
+        string aiModelVersion;    // e.g. "gemini-1.5-flash"
+        uint256 confidenceScore;  // 0-10000 (0.00%-100.00%)
+        string eventType;         // "violence", "theft", etc.
+        string clipCloudURI;      // local storage reference
     }
 
     // Mapping from video hash to Evidence struct
@@ -28,77 +35,111 @@ contract EvidenceLog {
         string cameraId,
         uint256 timestamp,
         address indexed uploader,
-        uint256 blockNumber
+        uint256 blockNumber,
+        bytes32 reportHash,
+        bytes32 perceptualHash,
+        string eventType,
+        uint256 confidenceScore
     );
 
     /**
      * @dev Logs a new piece of evidence on-chain
      * @param _videoHash SHA-256 hash of the video file (must be unique)
      * @param _cameraId Identifier of the camera that recorded the footage
-     * @param _timestamp Unix timestamp when the footage was hashed (real-time)
+     * @param _timestamp Unix timestamp when the footage was hashed
+     * @param _reportHash SHA-256 hash of the forensic report (bytes32(0) if not available)
+     * @param _perceptualHash Perceptual hash of video (bytes32(0) if not available)
+     * @param _aiModelVersion AI model used for analysis (empty string if N/A)
+     * @param _confidenceScore Detection confidence 0-10000
+     * @param _eventType Type of detected event (empty string if N/A)
+     * @param _clipCloudURI Cloud storage URI for the clip
      */
     function logEvidence(
         bytes32 _videoHash,
         string calldata _cameraId,
-        uint256 _timestamp
+        uint256 _timestamp,
+        bytes32 _reportHash,
+        bytes32 _perceptualHash,
+        string calldata _aiModelVersion,
+        uint256 _confidenceScore,
+        string calldata _eventType,
+        string calldata _clipCloudURI
     ) external {
-        // Ensure hash is not empty
         require(_videoHash != bytes32(0), "Video hash cannot be empty");
-
-        // Ensure this hash hasn't been logged before (prevents duplicates)
         require(
             evidenceRecords[_videoHash].videoHash == bytes32(0),
             "Evidence already exists"
         );
-
-        // Ensure camera ID is provided
         require(bytes(_cameraId).length > 0, "Camera ID cannot be empty");
-
-        // Ensure timestamp is valid (positive value)
         require(_timestamp > 0, "Timestamp must be positive");
+        require(_confidenceScore <= 10000, "Confidence score must be <= 10000");
 
-        // Create and store the evidence record
         evidenceRecords[_videoHash] = Evidence({
             videoHash: _videoHash,
             cameraId: _cameraId,
             timestamp: _timestamp,
             uploader: msg.sender,
             blockNumber: block.number,
-            loggedAt: block.timestamp
+            loggedAt: block.timestamp,
+            reportHash: _reportHash,
+            perceptualHash: _perceptualHash,
+            aiModelVersion: _aiModelVersion,
+            confidenceScore: _confidenceScore,
+            eventType: _eventType,
+            clipCloudURI: _clipCloudURI
         });
 
-        // Add hash to the array for enumeration
         evidenceHashes.push(_videoHash);
 
-        // Emit event for off-chain tracking
         emit EvidenceLogged(
             _videoHash,
             _cameraId,
             _timestamp,
             msg.sender,
-            block.number
+            block.number,
+            _reportHash,
+            _perceptualHash,
+            _eventType,
+            _confidenceScore
         );
     }
 
     /**
-     * @dev Verifies if a video hash exists on-chain and returns timing details
+     * @dev Verifies if a video hash exists on-chain and returns key details
      * @param _videoHash SHA-256 hash to verify
-     * @return exists True if the hash exists, false otherwise
-     * @return timestamp Unix timestamp when the footage was hashed (real-time)
+     * @return exists True if the hash exists
+     * @return timestamp Unix timestamp when the footage was hashed
      * @return loggedAt Block timestamp when evidence was logged on-chain
      * @return cameraId The camera that recorded the footage
+     * @return reportHash Hash of the forensic report
+     * @return perceptualHash Perceptual hash of the video
+     * @return eventType Type of detected event
+     * @return confidenceScore Detection confidence
      */
     function verifyEvidence(bytes32 _videoHash) external view returns (
         bool exists,
         uint256 timestamp,
         uint256 loggedAt,
-        string memory cameraId
+        string memory cameraId,
+        bytes32 reportHash,
+        bytes32 perceptualHash,
+        string memory eventType,
+        uint256 confidenceScore
     ) {
         Evidence memory evidence = evidenceRecords[_videoHash];
         if (evidence.videoHash == bytes32(0)) {
-            return (false, 0, 0, "");
+            return (false, 0, 0, "", bytes32(0), bytes32(0), "", 0);
         }
-        return (true, evidence.timestamp, evidence.loggedAt, evidence.cameraId);
+        return (
+            true,
+            evidence.timestamp,
+            evidence.loggedAt,
+            evidence.cameraId,
+            evidence.reportHash,
+            evidence.perceptualHash,
+            evidence.eventType,
+            evidence.confidenceScore
+        );
     }
 
     /**

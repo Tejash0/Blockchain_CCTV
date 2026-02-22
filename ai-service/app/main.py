@@ -17,20 +17,23 @@ from .core.video_buffer import VideoBuffer
 from .core.stream_processor import StreamProcessor
 from .core.recording_manager import RecordingManager, IncidentRecording
 from .core.hash_uploader import HashUploader, UploadResult
+from .core.forensic_report import ForensicReportGenerator
 from .models.violence_detector import ViolenceDetector, DetectionResult
 from .api.websocket import manager as ws_manager
 
 
 # Global state
 class AppState:
-    buffer: VideoBuffer = None
-    processor: StreamProcessor = None
-    detector: ViolenceDetector = None
-    recorder: RecordingManager = None
-    uploader: HashUploader = None
-    is_detecting: bool = False
-    last_detection: DetectionResult = None
-    analysis_frames: list = []
+    def __init__(self):
+        self.buffer = None
+        self.processor = None
+        self.detector = None
+        self.recorder = None
+        self.uploader = None
+        self.report_generator = None
+        self.is_detecting = False
+        self.last_detection = None
+        self.analysis_frames = []
 
 
 state = AppState()
@@ -38,8 +41,12 @@ state = AppState()
 
 def on_frame_callback(frame: np.ndarray):
     """Called for every frame - adds to buffer and active recording."""
-    if state.buffer:
-        state.buffer.add_frame(frame)
+    if state.buffer is None:
+        # Re-initialize buffer if lost (e.g. after module reload)
+        from .core.video_buffer import VideoBuffer
+        state.buffer = VideoBuffer(duration_seconds=settings.buffer_duration_seconds, fps=30)
+        print(f"[DEBUG] Buffer re-initialized: {state.buffer.max_frames} max frames")
+    state.buffer.add_frame(frame)
 
     # Add frame to active recording (captures entire event duration)
     if state.recorder and state.recorder.is_recording:
@@ -99,6 +106,29 @@ def on_recording_complete(recording: IncidentRecording):
         filepath=str(recording.filepath)
     ))
 
+    # Generate forensic report if available
+    if state.report_generator:
+        try:
+            import os
+            reports_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                'cloud-storage', 'reports'
+            )
+            report = state.report_generator.generate_report(
+                video_path=str(recording.filepath),
+                video_hash=recording.video_hash,
+                camera_id=recording.camera_id,
+                timestamp=recording.timestamp,
+                event_type=recording.event_type or recording.detection_type,
+                confidence=recording.confidence
+            )
+            state.report_generator.save_report(report, reports_dir)
+            recording.report_hash = report.report_hash
+            recording.ai_model_version = report.ai_model_version
+            print(f"Forensic report generated: hash={report.report_hash}")
+        except Exception as e:
+            print(f"Forensic report generation failed: {e}")
+
     # Upload to backend for blockchain storage
     if state.uploader:
         result = state.uploader.upload_recording_sync(recording)
@@ -131,11 +161,13 @@ async def lifespan(app: FastAPI):
         duration_seconds=settings.buffer_duration_seconds,
         fps=30
     )
+    print(f"Buffer initialized: {state.buffer}, max_frames={state.buffer.max_frames}")
 
     state.detector = ViolenceDetector(
         threshold=settings.detection_threshold,
         device=settings.model_device,
-        use_deep_learning=False  # Use motion-based for demo
+        use_deep_learning=True,
+        model_path=settings.yolo_model
     )
 
     state.recorder = RecordingManager(
@@ -149,6 +181,15 @@ async def lifespan(app: FastAPI):
         backend_url=settings.backend_url,
         timeout=settings.backend_timeout_seconds
     )
+
+    state.report_generator = ForensicReportGenerator(
+        api_key=settings.gemini_api_key,
+        model_name=settings.gemini_model
+    )
+    if state.report_generator.is_available:
+        print(f"Forensic report generator ready (model: {state.report_generator.model_name})")
+    else:
+        print("Forensic report generator: Gemini unavailable, using fallback reports")
 
     state.processor = StreamProcessor(
         source=settings.video_source,
@@ -222,12 +263,12 @@ async def get_status():
         video_source=settings.video_source,
         buffer_size=state.buffer.size if state.buffer else 0,
         buffer_duration=state.buffer.duration if state.buffer else 0,
-        fps=state.processor.actual_fps if state.processor else 0,
+        fps=float(state.processor.actual_fps) if state.processor else 0,
         detection_threshold=settings.detection_threshold,
         last_detection={
-            "is_violent": state.last_detection.is_violent,
-            "confidence": state.last_detection.confidence,
-            "description": state.last_detection.description
+            "is_violent": bool(state.last_detection.is_violent),
+            "confidence": float(state.last_detection.confidence),
+            "description": str(state.last_detection.description)
         } if state.last_detection else None,
         websocket_connections=ws_manager.connection_count
     )
@@ -236,13 +277,18 @@ async def get_status():
 @app.post("/api/ai/start")
 async def start_detection(request: StartDetectionRequest = None):
     """Start video stream and detection."""
+    source_changed = False
     if request and request.video_source:
         settings.video_source = request.video_source
         state.processor.source = request.video_source
+        source_changed = True
 
     if request and request.threshold:
         settings.detection_threshold = request.threshold
         state.detector.threshold = request.threshold
+
+    if source_changed and state.processor.is_running:
+        state.processor.stop()
 
     if not state.processor.is_running:
         success = state.processor.start()

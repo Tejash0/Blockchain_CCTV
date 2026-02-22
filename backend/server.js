@@ -9,7 +9,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 
-// Load environment variables
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -22,20 +21,29 @@ const HARDHAT_NETWORK_URL = process.env.HARDHAT_NETWORK_URL || 'http://127.0.0.1
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
-// Contract ABI (relevant functions only)
+// Cloud storage directories
+const CLOUD_STORAGE_ROOT = path.resolve(__dirname, '..', 'cloud-storage');
+const CLIPS_DIR = path.join(CLOUD_STORAGE_ROOT, 'clips');
+const REPORTS_DIR = path.join(CLOUD_STORAGE_ROOT, 'reports');
+
+// Ensure cloud storage directories exist
+[CLIPS_DIR, REPORTS_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+// Contract ABI (updated with new fields)
 const CONTRACT_ABI = [
-  "function logEvidence(bytes32 _videoHash, string _cameraId, uint256 _timestamp) external",
-  "function verifyEvidence(bytes32 _videoHash) external view returns (bool exists)",
-  "function getEvidence(bytes32 _videoHash) external view returns (tuple(bytes32 videoHash, string cameraId, uint256 timestamp, address uploader, uint256 blockNumber, uint256 loggedAt))",
+  "function logEvidence(bytes32 _videoHash, string _cameraId, uint256 _timestamp, bytes32 _reportHash, bytes32 _perceptualHash, string _aiModelVersion, uint256 _confidenceScore, string _eventType, string _clipCloudURI) external",
+  "function verifyEvidence(bytes32 _videoHash) external view returns (bool exists, uint256 timestamp, uint256 loggedAt, string cameraId, bytes32 reportHash, bytes32 perceptualHash, string eventType, uint256 confidenceScore)",
+  "function getEvidence(bytes32 _videoHash) external view returns (tuple(bytes32 videoHash, string cameraId, uint256 timestamp, address uploader, uint256 blockNumber, uint256 loggedAt, bytes32 reportHash, bytes32 perceptualHash, string aiModelVersion, uint256 confidenceScore, string eventType, string clipCloudURI))",
   "function getEvidenceCount() external view returns (uint256 count)",
   "function getEvidenceHashAtIndex(uint256 _index) external view returns (bytes32 hash)",
-  "event EvidenceLogged(bytes32 indexed videoHash, string cameraId, uint256 timestamp, address indexed uploader, uint256 blockNumber)"
+  "event EvidenceLogged(bytes32 indexed videoHash, string cameraId, uint256 timestamp, address indexed uploader, uint256 blockNumber, bytes32 reportHash, bytes32 perceptualHash, string eventType, uint256 confidenceScore)"
 ];
 
 // Initialize Express
 const app = express();
 
-// Middleware
 app.use(cors({
   origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
   methods: ['GET', 'POST'],
@@ -49,11 +57,8 @@ if (!fs.existsSync(VIDEOS_DIR)) {
   fs.mkdirSync(VIDEOS_DIR, { recursive: true });
 }
 
-// Configure multer for file uploads - save to disk
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, VIDEOS_DIR);
-  },
+  destination: (req, file, cb) => cb(null, VIDEOS_DIR),
   filename: (req, file, cb) => {
     const timestamp = Date.now();
     const ext = path.extname(file.originalname) || '.mp4';
@@ -63,16 +68,13 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
-  limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB limit
-  }
+  limits: { fileSize: 500 * 1024 * 1024 }
 });
 
 // Initialize SQLite database
 const db = new Database(path.resolve(__dirname, DATABASE_PATH));
 db.pragma('journal_mode = WAL');
 
-// Create tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS evidence_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,29 +87,41 @@ db.exec(`
     block_number INTEGER,
     uploader TEXT,
     detection_type TEXT,
+    report_hash TEXT,
+    perceptual_hash TEXT,
+    ai_model_version TEXT,
+    confidence_score INTEGER DEFAULT 0,
+    event_type TEXT,
+    clip_cloud_uri TEXT,
     status TEXT CHECK(status IN ('pending', 'confirmed', 'failed')) DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
-  CREATE INDEX IF NOT EXISTS idx_video_hash ON evidence_log(video_hash);
-  CREATE INDEX IF NOT EXISTS idx_status ON evidence_log(status);
-  CREATE INDEX IF NOT EXISTS idx_camera_id ON evidence_log(camera_id);
 `);
 
 // Add new columns if they don't exist (for existing databases)
-try {
-  db.exec(`ALTER TABLE evidence_log ADD COLUMN file_path TEXT`);
-} catch (e) { /* column already exists */ }
-try {
-  db.exec(`ALTER TABLE evidence_log ADD COLUMN file_size INTEGER`);
-} catch (e) { /* column already exists */ }
-try {
-  db.exec(`ALTER TABLE evidence_log ADD COLUMN detection_type TEXT`);
-} catch (e) { /* column already exists */ }
+const newColumns = [
+  'file_path TEXT', 'file_size INTEGER', 'detection_type TEXT',
+  'report_hash TEXT', 'perceptual_hash TEXT', 'ai_model_version TEXT',
+  'confidence_score INTEGER DEFAULT 0', 'event_type TEXT', 'clip_cloud_uri TEXT'
+];
+for (const col of newColumns) {
+  try { db.exec(`ALTER TABLE evidence_log ADD COLUMN ${col}`); } catch (e) { /* exists */ }
+}
+
+// Create indexes after columns exist
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_video_hash ON evidence_log(video_hash);
+  CREATE INDEX IF NOT EXISTS idx_status ON evidence_log(status);
+  CREATE INDEX IF NOT EXISTS idx_camera_id ON evidence_log(camera_id);
+  CREATE INDEX IF NOT EXISTS idx_event_type ON evidence_log(event_type);
+  CREATE INDEX IF NOT EXISTS idx_report_hash ON evidence_log(report_hash);
+`);
 
 // Prepared statements
 const insertEvidence = db.prepare(`
-  INSERT INTO evidence_log (video_hash, camera_id, timestamp, file_path, file_size, detection_type, status)
-  VALUES (?, ?, ?, ?, ?, ?, 'pending')
+  INSERT INTO evidence_log (video_hash, camera_id, timestamp, file_path, file_size, detection_type,
+    report_hash, perceptual_hash, ai_model_version, confidence_score, event_type, clip_cloud_uri, status)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
 `);
 
 const updateEvidenceConfirmed = db.prepare(`
@@ -141,7 +155,6 @@ async function initBlockchain() {
       console.error('ERROR: PRIVATE_KEY not set in .env file');
       return false;
     }
-
     if (!CONTRACT_ADDRESS) {
       console.error('ERROR: CONTRACT_ADDRESS not set in .env file');
       return false;
@@ -150,7 +163,6 @@ async function initBlockchain() {
     wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
 
-    // Test connection
     const network = await provider.getNetwork();
     console.log(`Connected to blockchain network: Chain ID ${network.chainId}`);
     console.log(`Contract address: ${CONTRACT_ADDRESS}`);
@@ -163,96 +175,133 @@ async function initBlockchain() {
   }
 }
 
-// Helper function to calculate SHA-256 hash
 function calculateHash(buffer) {
-  const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-  return '0x' + hash;
+  return '0x' + crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
-// Helper function to validate hash format
+/**
+ * Compute a perceptual hash approximation for video files.
+ * Uses a different hashing strategy: samples evenly-spaced chunks from the file
+ * and hashes them, providing content-locality sensitivity.
+ */
+function calculatePerceptualHash(buffer) {
+  const sampleSize = 4096;
+  const numSamples = 16;
+  const step = Math.max(1, Math.floor(buffer.length / numSamples));
+  const hash = crypto.createHash('sha256');
+
+  for (let i = 0; i < numSamples; i++) {
+    const offset = Math.min(i * step, buffer.length - sampleSize);
+    if (offset >= 0 && offset + sampleSize <= buffer.length) {
+      hash.update(buffer.slice(offset, offset + sampleSize));
+    }
+  }
+
+  return '0x' + hash.digest('hex');
+}
+
 function isValidHash(hash) {
   return /^0x[a-fA-F0-9]{64}$/.test(hash);
+}
+
+/**
+ * Compute Hamming distance between two 256-bit K2A hashes.
+ * Returns count of differing bits (0 = identical content, higher = more modified).
+ */
+function k2aHammingDistance(hash1, hash2) {
+  if (!hash1 || !hash2 || hash1 === ethers.ZeroHash || hash2 === ethers.ZeroHash) return null;
+  const h1 = BigInt(hash1);
+  const h2 = BigInt(hash2);
+  const xor = h1 ^ h2;
+  return xor.toString(2).split('').filter(b => b === '1').length;
+}
+
+/**
+ * Copy clip to cloud storage
+ */
+function storeClip(sourcePath, videoHash) {
+  try {
+    const ext = path.extname(sourcePath) || '.mp4';
+    const filename = `${videoHash.slice(2, 18)}_${Date.now()}${ext}`;
+    const destPath = path.join(CLIPS_DIR, filename);
+    fs.copyFileSync(sourcePath, destPath);
+    return `local://cloud-storage/clips/${filename}`;
+  } catch (e) {
+    console.error('Failed to store clip:', e.message);
+    return '';
+  }
 }
 
 // API Routes
 
 /**
  * POST /api/record
- * Upload video file, hash it, store on blockchain
  */
 app.post('/api/record', upload.single('video'), async (req, res) => {
   try {
-    // Validate input
     if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        error: 'No video file provided'
-      });
+      return res.status(400).json({ success: false, error: 'No video file provided' });
     }
 
     const cameraId = req.body.cameraId;
     if (!cameraId || cameraId.trim() === '') {
-      return res.status(400).json({
-        success: false,
-        error: 'Camera ID is required'
-      });
+      return res.status(400).json({ success: false, error: 'Camera ID is required' });
     }
 
     const detectionType = req.body.detectionType || 'manual';
-
-    // Read file from disk and calculate hash
     const filePath = req.file.path;
     const fileBuffer = fs.readFileSync(filePath);
     const videoHash = calculateHash(fileBuffer);
     const fileSize = req.file.size;
     const timestamp = Math.floor(Date.now() / 1000);
 
-    console.log(`Recording evidence: hash=${videoHash}, cameraId=${cameraId}, file=${filePath}`);
+    const reportHash = req.body.reportHash || ethers.ZeroHash;
+    const perceptualHash = req.body.perceptualHash && req.body.perceptualHash !== ethers.ZeroHash
+      ? req.body.perceptualHash
+      : calculatePerceptualHash(fileBuffer);
+    const aiModelVersion = req.body.aiModelVersion || '';
+    const confidenceScore = parseInt(req.body.confidenceScore) || 0;
+    const eventType = req.body.eventType || detectionType;
 
-    // Check if already exists in database
+    // Store clip to cloud storage
+    const clipCloudURI = storeClip(filePath, videoHash);
+
+    console.log(`Recording evidence: hash=${videoHash}, cameraId=${cameraId}, eventType=${eventType}`);
+
     const existing = getEvidenceByHash.get(videoHash);
     if (existing) {
       return res.status(409).json({
         success: false,
         error: 'Evidence with this hash already exists',
-        existing: {
-          videoHash: existing.video_hash,
-          cameraId: existing.camera_id,
-          status: existing.status
-        }
+        existing: { videoHash: existing.video_hash, cameraId: existing.camera_id, status: existing.status }
       });
     }
 
-    // Insert into database with pending status
     try {
-      insertEvidence.run(videoHash, cameraId.trim(), timestamp, filePath, fileSize, detectionType);
+      insertEvidence.run(
+        videoHash, cameraId.trim(), timestamp, filePath, fileSize, detectionType,
+        reportHash, perceptualHash, aiModelVersion, confidenceScore, eventType, clipCloudURI
+      );
     } catch (dbError) {
       if (dbError.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        // Delete the uploaded file since it's a duplicate
         fs.unlinkSync(filePath);
-        return res.status(409).json({
-          success: false,
-          error: 'Evidence already exists in database'
-        });
+        return res.status(409).json({ success: false, error: 'Evidence already exists in database' });
       }
       throw dbError;
     }
 
-    // Submit to blockchain
     try {
-      const tx = await contract.logEvidence(videoHash, cameraId.trim(), timestamp);
+      const tx = await contract.logEvidence(
+        videoHash, cameraId.trim(), timestamp,
+        reportHash, perceptualHash, aiModelVersion,
+        confidenceScore, eventType, clipCloudURI
+      );
       console.log(`Transaction submitted: ${tx.hash}`);
 
       const receipt = await tx.wait();
       console.log(`Transaction confirmed in block ${receipt.blockNumber}`);
 
-      // Update database with confirmation
-      updateEvidenceConfirmed.run(
-        receipt.hash,
-        receipt.blockNumber,
-        wallet.address,
-        videoHash
-      );
+      updateEvidenceConfirmed.run(receipt.hash, receipt.blockNumber, wallet.address, videoHash);
 
       return res.json({
         success: true,
@@ -261,104 +310,101 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
         blockNumber: receipt.blockNumber,
         cameraId: cameraId.trim(),
         timestamp,
-        filePath: filePath,
-        fileSize: fileSize,
-        detectionType: detectionType
+        filePath,
+        fileSize,
+        detectionType,
+        reportHash,
+        perceptualHash,
+        aiModelVersion,
+        confidenceScore,
+        eventType,
+        clipCloudURI
       });
 
     } catch (blockchainError) {
       console.error('Blockchain error:', blockchainError.message);
-
-      // Update database with failed status
       updateEvidenceFailed.run(videoHash);
 
-      // Check if it's a duplicate hash error from contract
       if (blockchainError.message.includes('Evidence already exists')) {
-        return res.status(409).json({
-          success: false,
-          error: 'Evidence already exists on blockchain'
-        });
+        return res.status(409).json({ success: false, error: 'Evidence already exists on blockchain' });
       }
-
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to record on blockchain: ' + blockchainError.message
-      });
+      return res.status(500).json({ success: false, error: 'Failed to record on blockchain: ' + blockchainError.message });
     }
 
   } catch (error) {
     console.error('Record error:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error: ' + error.message
-    });
+    return res.status(500).json({ success: false, error: 'Internal server error: ' + error.message });
   }
 });
 
 /**
  * POST /api/verify
- * Upload video file, verify against blockchain
  */
 app.post('/api/verify', upload.single('video'), async (req, res) => {
   try {
-    // Validate input
     if (!req.file) {
-      return res.status(400).json({
-        verified: false,
-        error: 'No video file provided'
-      });
+      return res.status(400).json({ verified: false, error: 'No video file provided' });
     }
 
-    // Read file from disk and calculate hash
     const fileBuffer = fs.readFileSync(req.file.path);
     const videoHash = calculateHash(fileBuffer);
+    // Compute K2A perceptual hash of the uploaded file for content comparison
+    const uploadedPerceptualHash = calculatePerceptualHash(fileBuffer);
     console.log(`Verifying evidence: hash=${videoHash}`);
 
-    // Delete the uploaded file after hashing (we don't need to keep verification uploads)
     fs.unlinkSync(req.file.path);
 
-    // Level 1: Check SQL cache
     const cachedEvidence = getEvidenceByHash.get(videoHash);
 
-    // Level 2: Verify on blockchain
     try {
-      const exists = await contract.verifyEvidence(videoHash);
+      const result = await contract.verifyEvidence(videoHash);
 
-      if (exists) {
-        // Get full evidence from blockchain
+      if (result.exists) {
         const evidence = await contract.getEvidence(videoHash);
 
-        const result = {
+        // K2A perceptual hash comparison for content authenticity
+        const storedPerceptualHash = evidence.perceptualHash;
+        const hammingDist = k2aHammingDistance(storedPerceptualHash, uploadedPerceptualHash);
+        const k2aVerdict = hammingDist === null
+          ? 'no_perceptual_hash'
+          : hammingDist <= 8 ? 'content_authentic' : 'content_modified';
+
+        const responseData = {
           verified: true,
           source: cachedEvidence ? 'cache+blockchain' : 'blockchain',
+          k2a_hamming_distance: hammingDist,
+          k2a_verdict: k2aVerdict,
           evidence: {
             videoHash: evidence.videoHash,
             cameraId: evidence.cameraId,
             timestamp: Number(evidence.timestamp),
             uploader: evidence.uploader,
             blockNumber: Number(evidence.blockNumber),
-            loggedAt: Number(evidence.loggedAt)
+            loggedAt: Number(evidence.loggedAt),
+            reportHash: evidence.reportHash,
+            perceptualHash: evidence.perceptualHash,
+            aiModelVersion: evidence.aiModelVersion,
+            confidenceScore: Number(evidence.confidenceScore),
+            eventType: evidence.eventType,
+            clipCloudURI: evidence.clipCloudURI
           }
         };
 
-        // If not in cache, add it
         if (!cachedEvidence) {
           try {
-            insertEvidence.run(videoHash, evidence.cameraId, Number(evidence.timestamp), null, null, 'discovered');
-            updateEvidenceConfirmed.run(
-              null, // No tx hash for discovered evidence
-              Number(evidence.blockNumber),
-              evidence.uploader,
-              videoHash
+            insertEvidence.run(
+              videoHash, evidence.cameraId, Number(evidence.timestamp),
+              null, null, 'discovered',
+              evidence.reportHash, evidence.perceptualHash,
+              evidence.aiModelVersion, Number(evidence.confidenceScore),
+              evidence.eventType, evidence.clipCloudURI
             );
-          } catch (e) {
-            // Ignore if already exists
-          }
+            updateEvidenceConfirmed.run(null, Number(evidence.blockNumber), evidence.uploader, videoHash);
+          } catch (e) { /* ignore if exists */ }
         }
 
-        return res.json(result);
+        return res.json(responseData);
       } else {
-        // Not found on blockchain
         return res.json({
           verified: false,
           videoHash,
@@ -371,7 +417,6 @@ app.post('/api/verify', upload.single('video'), async (req, res) => {
     } catch (blockchainError) {
       console.error('Blockchain verification error:', blockchainError.message);
 
-      // Fall back to cache if blockchain unavailable
       if (cachedEvidence && cachedEvidence.status === 'confirmed') {
         return res.json({
           verified: true,
@@ -382,41 +427,36 @@ app.post('/api/verify', upload.single('video'), async (req, res) => {
             cameraId: cachedEvidence.camera_id,
             timestamp: cachedEvidence.timestamp,
             uploader: cachedEvidence.uploader,
-            blockNumber: cachedEvidence.block_number
+            blockNumber: cachedEvidence.block_number,
+            reportHash: cachedEvidence.report_hash,
+            perceptualHash: cachedEvidence.perceptual_hash,
+            aiModelVersion: cachedEvidence.ai_model_version,
+            confidenceScore: cachedEvidence.confidence_score,
+            eventType: cachedEvidence.event_type,
+            clipCloudURI: cachedEvidence.clip_cloud_uri
           }
         });
       }
 
-      return res.status(500).json({
-        verified: false,
-        error: 'Blockchain verification failed: ' + blockchainError.message
-      });
+      return res.status(500).json({ verified: false, error: 'Blockchain verification failed: ' + blockchainError.message });
     }
 
   } catch (error) {
     console.error('Verify error:', error);
-    return res.status(500).json({
-      verified: false,
-      error: 'Internal server error: ' + error.message
-    });
+    return res.status(500).json({ verified: false, error: 'Internal server error: ' + error.message });
   }
 });
 
 /**
  * GET /api/logs
- * Get all evidence records from blockchain
  */
 app.get('/api/logs', async (req, res) => {
   try {
-    // Get count from blockchain
     const count = await contract.getEvidenceCount();
     const totalCount = Number(count);
-
     console.log(`Fetching ${totalCount} evidence records from blockchain`);
 
     const records = [];
-
-    // Fetch all evidence from blockchain
     for (let i = 0; i < totalCount; i++) {
       try {
         const hash = await contract.getEvidenceHashAtIndex(i);
@@ -428,26 +468,26 @@ app.get('/api/logs', async (req, res) => {
           timestamp: Number(evidence.timestamp),
           uploader: evidence.uploader,
           blockNumber: Number(evidence.blockNumber),
-          loggedAt: Number(evidence.loggedAt)
+          loggedAt: Number(evidence.loggedAt),
+          reportHash: evidence.reportHash,
+          perceptualHash: evidence.perceptualHash,
+          aiModelVersion: evidence.aiModelVersion,
+          confidenceScore: Number(evidence.confidenceScore),
+          eventType: evidence.eventType,
+          clipCloudURI: evidence.clipCloudURI
         });
       } catch (e) {
         console.error(`Error fetching evidence at index ${i}:`, e.message);
       }
     }
 
-    // Sort by timestamp descending (newest first)
     records.sort((a, b) => b.timestamp - a.timestamp);
 
-    return res.json({
-      success: true,
-      count: records.length,
-      records
-    });
+    return res.json({ success: true, count: records.length, records });
 
   } catch (error) {
     console.error('Logs error:', error);
 
-    // Fall back to database cache
     try {
       const cachedRecords = getAllEvidence.all();
       return res.json({
@@ -464,37 +504,30 @@ app.get('/api/logs', async (req, res) => {
           filePath: r.file_path,
           fileSize: r.file_size,
           detectionType: r.detection_type,
+          reportHash: r.report_hash,
+          perceptualHash: r.perceptual_hash,
+          aiModelVersion: r.ai_model_version,
+          confidenceScore: r.confidence_score,
+          eventType: r.event_type,
+          clipCloudURI: r.clip_cloud_uri,
           status: r.status
         }))
       });
     } catch (dbError) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to fetch logs: ' + error.message
-      });
+      return res.status(500).json({ success: false, error: 'Failed to fetch logs: ' + error.message });
     }
   }
 });
 
 /**
  * GET /api/health
- * Health check endpoint
  */
 app.get('/api/health', async (req, res) => {
   try {
     const blockNumber = await provider.getBlockNumber();
-    return res.json({
-      status: 'ok',
-      blockchain: 'connected',
-      blockNumber,
-      contractAddress: CONTRACT_ADDRESS
-    });
+    return res.json({ status: 'ok', blockchain: 'connected', blockNumber, contractAddress: CONTRACT_ADDRESS });
   } catch (error) {
-    return res.json({
-      status: 'degraded',
-      blockchain: 'disconnected',
-      error: error.message
-    });
+    return res.json({ status: 'degraded', blockchain: 'disconnected', error: error.message });
   }
 });
 

@@ -15,6 +15,7 @@ import numpy as np
 
 from .video_buffer import VideoBuffer, BufferedFrame
 from ..config import settings
+from ..utils.phash import compute_video_phash
 
 
 @dataclass
@@ -28,6 +29,11 @@ class IncidentRecording:
     frame_count: int
     detection_type: str
     confidence: float
+    perceptual_hash: str = ""
+    report_hash: str = ""
+    ai_model_version: str = ""
+    event_type: str = ""
+    clip_cloud_uri: str = ""
 
 
 class RecordingManager:
@@ -173,8 +179,15 @@ class RecordingManager:
             # Save video
             self._save_video(all_frames, filepath)
 
-            # Calculate hash
+            # Calculate hashes
             video_hash = self._calculate_hash(filepath)
+
+            # Compute perceptual hash
+            perceptual_hash = ""
+            try:
+                perceptual_hash = compute_video_phash(str(filepath))
+            except Exception as e:
+                print(f"pHash computation failed: {e}")
 
             # Create recording info
             recording = IncidentRecording(
@@ -185,7 +198,9 @@ class RecordingManager:
                 duration=len(all_frames) / self.fps,
                 frame_count=len(all_frames),
                 detection_type=self._current_detection_type,
-                confidence=self._current_confidence
+                confidence=self._current_confidence,
+                perceptual_hash=perceptual_hash,
+                event_type=self._current_detection_type
             )
 
             print(f"Recording saved: {filepath}")

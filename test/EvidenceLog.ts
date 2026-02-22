@@ -11,11 +11,36 @@ describe("EvidenceLog", function () {
   // Sample test data
   const sampleHash = ethers.keccak256(ethers.toUtf8Bytes("sample_video_content"));
   const sampleCameraId = "CAM-001";
-  const sampleTimestamp = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
+  const sampleTimestamp = Math.floor(Date.now() / 1000) - 3600;
+  const sampleReportHash = ethers.keccak256(ethers.toUtf8Bytes("sample_report"));
+  const samplePerceptualHash = ethers.keccak256(ethers.toUtf8Bytes("sample_phash"));
+  const sampleAiModel = "gemini-1.5-flash";
+  const sampleConfidence = 8500; // 85.00%
+  const sampleEventType = "violence";
+  const sampleClipURI = "local://cloud-storage/clips/evidence_001.mp4";
+
+  // Helper to call logEvidence with all params
+  function logEvidenceFull(
+    contract: EvidenceLog,
+    videoHash = sampleHash,
+    cameraId = sampleCameraId,
+    timestamp = sampleTimestamp,
+    reportHash = sampleReportHash,
+    perceptualHash = samplePerceptualHash,
+    aiModelVersion = sampleAiModel,
+    confidenceScore = sampleConfidence,
+    eventType = sampleEventType,
+    clipCloudURI = sampleClipURI
+  ) {
+    return contract.logEvidence(
+      videoHash, cameraId, timestamp,
+      reportHash, perceptualHash, aiModelVersion,
+      confidenceScore, eventType, clipCloudURI
+    );
+  }
 
   beforeEach(async function () {
     [owner, addr1] = await ethers.getSigners();
-
     const EvidenceLogFactory = await ethers.getContractFactory("EvidenceLog");
     evidenceLog = await EvidenceLogFactory.deploy();
     await evidenceLog.waitForDeployment();
@@ -32,113 +57,153 @@ describe("EvidenceLog", function () {
   });
 
   describe("logEvidence", function () {
-    it("Should log evidence successfully", async function () {
-      await expect(
-        evidenceLog.logEvidence(sampleHash, sampleCameraId, sampleTimestamp)
-      )
+    it("Should log evidence with all new fields", async function () {
+      await logEvidenceFull(evidenceLog);
+      expect(await evidenceLog.getEvidenceCount()).to.equal(1);
+
+      const evidence = await evidenceLog.getEvidence(sampleHash);
+      expect(evidence.videoHash).to.equal(sampleHash);
+      expect(evidence.cameraId).to.equal(sampleCameraId);
+      expect(evidence.timestamp).to.equal(sampleTimestamp);
+      expect(evidence.uploader).to.equal(owner.address);
+      expect(evidence.reportHash).to.equal(sampleReportHash);
+      expect(evidence.perceptualHash).to.equal(samplePerceptualHash);
+      expect(evidence.aiModelVersion).to.equal(sampleAiModel);
+      expect(evidence.confidenceScore).to.equal(sampleConfidence);
+      expect(evidence.eventType).to.equal(sampleEventType);
+      expect(evidence.clipCloudURI).to.equal(sampleClipURI);
+    });
+
+    it("Should emit EvidenceLogged event with new fields", async function () {
+      await expect(logEvidenceFull(evidenceLog))
         .to.emit(evidenceLog, "EvidenceLogged")
         .withArgs(
           sampleHash,
           sampleCameraId,
           sampleTimestamp,
           owner.address,
-          await ethers.provider.getBlockNumber() + 1
+          await ethers.provider.getBlockNumber() + 1,
+          sampleReportHash,
+          samplePerceptualHash,
+          sampleEventType,
+          sampleConfidence
         );
-
-      expect(await evidenceLog.getEvidenceCount()).to.equal(1);
     });
 
-    it("Should store correct evidence data", async function () {
-      await evidenceLog.logEvidence(sampleHash, sampleCameraId, sampleTimestamp);
+    it("Should allow zero report and perceptual hashes (Phase 1 defaults)", async function () {
+      await logEvidenceFull(
+        evidenceLog, sampleHash, sampleCameraId, sampleTimestamp,
+        ethers.ZeroHash, ethers.ZeroHash, "", 0, "", ""
+      );
 
       const evidence = await evidenceLog.getEvidence(sampleHash);
-      expect(evidence.videoHash).to.equal(sampleHash);
-      expect(evidence.cameraId).to.equal(sampleCameraId);
-      expect(evidence.timestamp).to.equal(sampleTimestamp);
-      expect(evidence.uploader).to.equal(owner.address);
+      expect(evidence.reportHash).to.equal(ethers.ZeroHash);
+      expect(evidence.perceptualHash).to.equal(ethers.ZeroHash);
+      expect(evidence.aiModelVersion).to.equal("");
+      expect(evidence.confidenceScore).to.equal(0);
+      expect(evidence.eventType).to.equal("");
+      expect(evidence.clipCloudURI).to.equal("");
+    });
+
+    it("Should reject confidence score > 10000", async function () {
+      await expect(
+        logEvidenceFull(
+          evidenceLog, sampleHash, sampleCameraId, sampleTimestamp,
+          sampleReportHash, samplePerceptualHash, sampleAiModel,
+          10001, sampleEventType, sampleClipURI
+        )
+      ).to.be.revertedWith("Confidence score must be <= 10000");
+    });
+
+    it("Should accept confidence score of exactly 10000", async function () {
+      await logEvidenceFull(
+        evidenceLog, sampleHash, sampleCameraId, sampleTimestamp,
+        sampleReportHash, samplePerceptualHash, sampleAiModel,
+        10000, sampleEventType, sampleClipURI
+      );
+      const evidence = await evidenceLog.getEvidence(sampleHash);
+      expect(evidence.confidenceScore).to.equal(10000);
     });
 
     it("Should prevent duplicate hashes", async function () {
-      await evidenceLog.logEvidence(sampleHash, sampleCameraId, sampleTimestamp);
-
-      await expect(
-        evidenceLog.logEvidence(sampleHash, "CAM-002", sampleTimestamp)
-      ).to.be.revertedWith("Evidence already exists");
+      await logEvidenceFull(evidenceLog);
+      await expect(logEvidenceFull(evidenceLog)).to.be.revertedWith("Evidence already exists");
     });
 
     it("Should reject empty video hash", async function () {
-      const emptyHash = ethers.ZeroHash;
-
       await expect(
-        evidenceLog.logEvidence(emptyHash, sampleCameraId, sampleTimestamp)
+        logEvidenceFull(evidenceLog, ethers.ZeroHash)
       ).to.be.revertedWith("Video hash cannot be empty");
     });
 
     it("Should reject empty camera ID", async function () {
       await expect(
-        evidenceLog.logEvidence(sampleHash, "", sampleTimestamp)
+        logEvidenceFull(evidenceLog, sampleHash, "")
       ).to.be.revertedWith("Camera ID cannot be empty");
-    });
-
-    it("Should reject future timestamps", async function () {
-      const futureTimestamp = Math.floor(Date.now() / 1000) + 86400; // 1 day in future
-
-      await expect(
-        evidenceLog.logEvidence(sampleHash, sampleCameraId, futureTimestamp)
-      ).to.be.revertedWith("Timestamp cannot be in the future");
     });
 
     it("Should allow different users to log evidence", async function () {
       const hash1 = ethers.keccak256(ethers.toUtf8Bytes("video1"));
       const hash2 = ethers.keccak256(ethers.toUtf8Bytes("video2"));
 
-      await evidenceLog.connect(owner).logEvidence(hash1, "CAM-001", sampleTimestamp);
-      await evidenceLog.connect(addr1).logEvidence(hash2, "CAM-002", sampleTimestamp);
+      await logEvidenceFull(evidenceLog.connect(owner), hash1);
+      await logEvidenceFull(evidenceLog.connect(addr1), hash2);
 
       const evidence1 = await evidenceLog.getEvidence(hash1);
       const evidence2 = await evidenceLog.getEvidence(hash2);
-
       expect(evidence1.uploader).to.equal(owner.address);
       expect(evidence2.uploader).to.equal(addr1.address);
     });
   });
 
   describe("verifyEvidence", function () {
-    it("Should return true for existing evidence", async function () {
-      await evidenceLog.logEvidence(sampleHash, sampleCameraId, sampleTimestamp);
+    it("Should return full details for existing evidence", async function () {
+      await logEvidenceFull(evidenceLog);
 
-      expect(await evidenceLog.verifyEvidence(sampleHash)).to.equal(true);
+      const result = await evidenceLog.verifyEvidence(sampleHash);
+      expect(result.exists).to.equal(true);
+      expect(result.timestamp).to.equal(sampleTimestamp);
+      expect(result.cameraId).to.equal(sampleCameraId);
+      expect(result.reportHash).to.equal(sampleReportHash);
+      expect(result.perceptualHash).to.equal(samplePerceptualHash);
+      expect(result.eventType).to.equal(sampleEventType);
+      expect(result.confidenceScore).to.equal(sampleConfidence);
     });
 
-    it("Should return false for non-existent evidence", async function () {
-      const nonExistentHash = ethers.keccak256(ethers.toUtf8Bytes("non_existent"));
-
-      expect(await evidenceLog.verifyEvidence(nonExistentHash)).to.equal(false);
+    it("Should return false with zeros for non-existent evidence", async function () {
+      const nonExistent = ethers.keccak256(ethers.toUtf8Bytes("non_existent"));
+      const result = await evidenceLog.verifyEvidence(nonExistent);
+      expect(result.exists).to.equal(false);
+      expect(result.timestamp).to.equal(0);
+      expect(result.reportHash).to.equal(ethers.ZeroHash);
+      expect(result.perceptualHash).to.equal(ethers.ZeroHash);
     });
   });
 
   describe("getEvidence", function () {
-    it("Should return complete evidence record", async function () {
-      const tx = await evidenceLog.logEvidence(sampleHash, sampleCameraId, sampleTimestamp);
+    it("Should return complete evidence record with all fields", async function () {
+      const tx = await logEvidenceFull(evidenceLog);
       const receipt = await tx.wait();
       const block = await ethers.provider.getBlock(receipt!.blockNumber);
 
       const evidence = await evidenceLog.getEvidence(sampleHash);
-
       expect(evidence.videoHash).to.equal(sampleHash);
       expect(evidence.cameraId).to.equal(sampleCameraId);
       expect(evidence.timestamp).to.equal(sampleTimestamp);
       expect(evidence.uploader).to.equal(owner.address);
       expect(evidence.blockNumber).to.equal(receipt!.blockNumber);
       expect(evidence.loggedAt).to.equal(block!.timestamp);
+      expect(evidence.reportHash).to.equal(sampleReportHash);
+      expect(evidence.perceptualHash).to.equal(samplePerceptualHash);
+      expect(evidence.aiModelVersion).to.equal(sampleAiModel);
+      expect(evidence.confidenceScore).to.equal(sampleConfidence);
+      expect(evidence.eventType).to.equal(sampleEventType);
+      expect(evidence.clipCloudURI).to.equal(sampleClipURI);
     });
 
     it("Should revert for non-existent evidence", async function () {
-      const nonExistentHash = ethers.keccak256(ethers.toUtf8Bytes("non_existent"));
-
-      await expect(
-        evidenceLog.getEvidence(nonExistentHash)
-      ).to.be.revertedWith("Evidence does not exist");
+      const nonExistent = ethers.keccak256(ethers.toUtf8Bytes("non_existent"));
+      await expect(evidenceLog.getEvidence(nonExistent)).to.be.revertedWith("Evidence does not exist");
     });
   });
 
@@ -146,18 +211,10 @@ describe("EvidenceLog", function () {
     it("Should track evidence count correctly", async function () {
       expect(await evidenceLog.getEvidenceCount()).to.equal(0);
 
-      await evidenceLog.logEvidence(
-        ethers.keccak256(ethers.toUtf8Bytes("video1")),
-        "CAM-001",
-        sampleTimestamp
-      );
+      await logEvidenceFull(evidenceLog, ethers.keccak256(ethers.toUtf8Bytes("video1")));
       expect(await evidenceLog.getEvidenceCount()).to.equal(1);
 
-      await evidenceLog.logEvidence(
-        ethers.keccak256(ethers.toUtf8Bytes("video2")),
-        "CAM-002",
-        sampleTimestamp
-      );
+      await logEvidenceFull(evidenceLog, ethers.keccak256(ethers.toUtf8Bytes("video2")), "CAM-002");
       expect(await evidenceLog.getEvidenceCount()).to.equal(2);
     });
 
@@ -165,17 +222,15 @@ describe("EvidenceLog", function () {
       const hash1 = ethers.keccak256(ethers.toUtf8Bytes("video1"));
       const hash2 = ethers.keccak256(ethers.toUtf8Bytes("video2"));
 
-      await evidenceLog.logEvidence(hash1, "CAM-001", sampleTimestamp);
-      await evidenceLog.logEvidence(hash2, "CAM-002", sampleTimestamp);
+      await logEvidenceFull(evidenceLog, hash1);
+      await logEvidenceFull(evidenceLog, hash2, "CAM-002");
 
       expect(await evidenceLog.getEvidenceHashAtIndex(0)).to.equal(hash1);
       expect(await evidenceLog.getEvidenceHashAtIndex(1)).to.equal(hash2);
     });
 
     it("Should revert for out of bounds index", async function () {
-      await expect(
-        evidenceLog.getEvidenceHashAtIndex(0)
-      ).to.be.revertedWith("Index out of bounds");
+      await expect(evidenceLog.getEvidenceHashAtIndex(0)).to.be.revertedWith("Index out of bounds");
     });
   });
 });

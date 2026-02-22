@@ -65,7 +65,12 @@ class HashUploader:
                 }
                 data = {
                     "cameraId": recording.camera_id,
-                    "detectionType": recording.detection_type
+                    "detectionType": recording.detection_type,
+                    "eventType": recording.event_type or recording.detection_type,
+                    "confidenceScore": str(int(recording.confidence * 10000)),
+                    "aiModelVersion": recording.ai_model_version or "",
+                    "reportHash": recording.report_hash or "0x" + "0" * 64,
+                    "perceptualHash": recording.perceptual_hash or "0x" + "0" * 64,
                 }
 
                 # POST to backend

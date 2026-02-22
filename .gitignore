@@ -3,6 +3,7 @@ c_refrences
 .claude
 .env
 CLAUDE.md
+res
 # Hardhat files
 cache/
 artifacts/
