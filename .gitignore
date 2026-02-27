@@ -1,9 +1,9 @@
 node_modules
-c_refrences
 .claude
 .env
 CLAUDE.md
-res
+docs
+test_videos
 # Hardhat files
 cache/
 artifacts/
@@ -38,9 +38,25 @@ frontend/dist/
 
 # AI Service
 ai-service/venv/
+ai-service/.venv/
 ai-service/.env
 ai-service/recordings/*.mp4
 ai-service/__pycache__/
 ai-service/app/__pycache__/
 ai-service/app/**/__pycache__/
 *.pyc
+
+# Cloud storage (runtime clips)
+cloud-storage/clips/
+
+# Experiments temp files
+experiments/__pycache__/
+
+# LaTeX build artifacts
+docs/paper/*.aux
+docs/paper/*.log
+docs/paper/*.out
+docs/paper/*.toc
+docs/paper/*.bbl
+docs/paper/*.blg
+docs/paper/*.synctex.gz
