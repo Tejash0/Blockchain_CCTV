@@ -42,18 +42,18 @@ function Alerts() {
     setIsLoading(false);
   };
 
-  // Stop detection
+  // Stop detection + camera stream
   const stopDetection = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/ai/stop', {
+      const response = await fetch('http://localhost:8000/api/ai/stop-stream', {
         method: 'POST'
       });
       if (response.ok) {
         fetchStatus();
       }
     } catch (error) {
-      console.error('Failed to stop detection:', error);
+      console.error('Failed to stop stream:', error);
     }
     setIsLoading(false);
   };
@@ -69,6 +69,21 @@ function Alerts() {
     } catch (error) {
       console.error('Failed to trigger test:', error);
       alert('Failed to trigger test recording');
+    }
+  };
+
+  // Stop active recording
+  const stopRecording = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/ai/stop', {
+        method: 'POST'
+      });
+      const data = await response.json();
+      alert(data.status || 'Recording stopped');
+      fetchStatus();
+    } catch (error) {
+      console.error('Failed to stop recording:', error);
+      alert('Failed to stop recording');
     }
   };
 
@@ -167,6 +182,13 @@ function Alerts() {
             className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
           >
             Test Recording
+          </button>
+          <button
+            onClick={stopRecording}
+            disabled={isLoading || !aiStatus?.is_detecting}
+            className="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Stop Recording
           </button>
         </div>
       </div>

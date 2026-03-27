@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3-flash-preview"
     enable_forensic_reports: bool = True
 
+    # Email alerts (optional — leave blank to disable)
+    alert_smtp_host: str = "smtp.gmail.com"
+    alert_smtp_port: int = 465
+    alert_email_sender: str = ""       # your Gmail address
+    alert_email_password: str = ""     # Gmail App Password (not login password)
+    alert_email_recipients: str = ""   # comma-separated recipient emails
+
     # WebSocket
     ws_heartbeat_interval: int = 30
     max_ws_connections: int = 100

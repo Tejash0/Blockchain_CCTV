@@ -143,6 +143,24 @@ def on_recording_complete(recording: IncidentRecording):
                 video_hash=result.video_hash,
                 transaction_hash=result.transaction_hash
             ))
+
+            # Send email alert if configured
+            recipients = [r.strip() for r in settings.alert_email_recipients.split(",") if r.strip()]
+            if recipients:
+                from .utils.email_alert import send_incident_email
+                send_incident_email(
+                    smtp_host=settings.alert_smtp_host,
+                    smtp_port=settings.alert_smtp_port,
+                    sender=settings.alert_email_sender,
+                    password=settings.alert_email_password,
+                    recipients=recipients,
+                    camera_id=recording.camera_id,
+                    event_type=recording.event_type or recording.detection_type,
+                    confidence=recording.confidence,
+                    video_hash=result.video_hash,
+                    transaction_hash=result.transaction_hash,
+                    timestamp=recording.timestamp,
+                )
         else:
             print(f"Upload failed: {result.error}")
             asyncio.run(ws_manager.send_recording_alert(
@@ -349,6 +367,27 @@ async def list_recordings():
 
     recordings.sort(key=lambda x: x["created"], reverse=True)
     return {"recordings": recordings}
+
+
+@app.post("/api/ai/k2a")
+async def compute_k2a(video: UploadFile = File(...)):
+    """
+    Compute K2A perceptual hash for an uploaded video.
+    Single authoritative Python implementation — called by backend so both
+    /api/record and /api/verify use identical hashing logic.
+    """
+    suffix = os.path.splitext(video.filename or "video.mp4")[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await video.read())
+        tmp_path = tmp.name
+    try:
+        from .utils.k2a_hash import compute_video_k2a_hash
+        k2a_hash = compute_video_k2a_hash(tmp_path)
+        return JSONResponse(content={"k2a_hash": k2a_hash})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"K2A computation failed: {str(e)}")
+    finally:
+        os.unlink(tmp_path)
 
 
 @app.post("/api/ai/analyze")

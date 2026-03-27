@@ -187,24 +187,23 @@ function calculateHash(buffer) {
 }
 
 /**
- * Compute a perceptual hash approximation for video files.
- * Uses a different hashing strategy: samples evenly-spaced chunks from the file
- * and hashes them, providing content-locality sensitivity.
+ * Compute K2A perceptual hash by delegating to the AI service.
+ * Single authoritative implementation lives in ai-service/app/utils/k2a_hash.py.
+ * Returns ethers.ZeroHash if AI service is unavailable — callers treat this as
+ * "no perceptual hash" and k2aHammingDistance() returns null safely.
  */
-function calculatePerceptualHash(buffer) {
-  const sampleSize = 4096;
-  const numSamples = 16;
-  const step = Math.max(1, Math.floor(buffer.length / numSamples));
-  const hash = crypto.createHash('sha256');
-
-  for (let i = 0; i < numSamples; i++) {
-    const offset = Math.min(i * step, buffer.length - sampleSize);
-    if (offset >= 0 && offset + sampleSize <= buffer.length) {
-      hash.update(buffer.slice(offset, offset + sampleSize));
-    }
+async function calculatePerceptualHash(buffer, filename = 'video.mp4', mimetype = 'video/mp4') {
+  try {
+    const formData = new FormData();
+    formData.append('video', new File([buffer], filename, { type: mimetype }));
+    const res = await fetch('http://localhost:8000/api/ai/k2a', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error(`AI service returned ${res.status}`);
+    const { k2a_hash } = await res.json();
+    return k2a_hash;
+  } catch (err) {
+    console.error(`K2A via AI service failed: ${err.message}`);
+    return ethers.ZeroHash;
   }
-
-  return '0x' + hash.digest('hex');
 }
 
 function isValidHash(hash) {
@@ -308,7 +307,7 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
     const reportHash = req.body.reportHash || ethers.ZeroHash;
     const perceptualHash = req.body.perceptualHash && req.body.perceptualHash !== ethers.ZeroHash
       ? req.body.perceptualHash
-      : calculatePerceptualHash(fileBuffer);
+      : await calculatePerceptualHash(fileBuffer, req.file.originalname, req.file.mimetype);
     const aiModelVersion = req.body.aiModelVersion || '';
     const confidenceScore = parseInt(req.body.confidenceScore) || 0;
     const eventType = req.body.eventType || detectionType;
@@ -415,7 +414,7 @@ app.post('/api/verify', uploadMemory.single('video'), async (req, res) => {
     // Buffer lives in memory only — no disk write, no clip stored
     const fileBuffer = req.file.buffer;
     const videoHash = calculateHash(fileBuffer);
-    const uploadedPerceptualHash = calculatePerceptualHash(fileBuffer);
+    const uploadedPerceptualHash = await calculatePerceptualHash(fileBuffer, req.file.originalname, req.file.mimetype);
     console.log(`Verifying evidence: hash=${videoHash}`);
 
     // Call AI service for Gemini forensic report on the uploaded video
@@ -570,38 +569,31 @@ app.post('/api/verify', uploadMemory.single('video'), async (req, res) => {
  */
 app.get('/api/logs', async (req, res) => {
   try {
-    const count = await contract.getEvidenceCount();
-    const totalCount = Number(count);
-    console.log(`Fetching ${totalCount} evidence records from blockchain`);
-
-    const records = [];
-    for (let i = 0; i < totalCount; i++) {
-      try {
-        const hash = await contract.getEvidenceHashAtIndex(i);
-        const evidence = await contract.getEvidence(hash);
-
-        records.push({
-          videoHash: evidence.videoHash,
-          cameraId: evidence.cameraId,
-          timestamp: Number(evidence.timestamp),
-          uploader: evidence.uploader,
-          blockNumber: Number(evidence.blockNumber),
-          loggedAt: Number(evidence.loggedAt),
-          reportHash: evidence.reportHash,
-          perceptualHash: evidence.perceptualHash,
-          aiModelVersion: evidence.aiModelVersion,
-          confidenceScore: Number(evidence.confidenceScore),
-          eventType: evidence.eventType,
-          clipCloudURI: evidence.clipCloudURI
-        });
-      } catch (e) {
-        console.error(`Error fetching evidence at index ${i}:`, e.message);
-      }
-    }
-
-    records.sort((a, b) => b.timestamp - a.timestamp);
-
-    return res.json({ success: true, count: records.length, records });
+    // Serve from SQLite immediately — it is kept in sync with the blockchain.
+    // Hitting the blockchain per-record (N RPC calls) is too slow for a dashboard.
+    const cachedRecords = getAllEvidence.all();
+    return res.json({
+      success: true,
+      source: 'cache',
+      count: cachedRecords.length,
+      records: cachedRecords.map(r => ({
+        videoHash: r.video_hash,
+        cameraId: r.camera_id,
+        timestamp: r.timestamp,
+        uploader: r.uploader,
+        blockNumber: r.block_number,
+        filePath: r.file_path,
+        fileSize: r.file_size,
+        detectionType: r.detection_type,
+        reportHash: r.report_hash,
+        perceptualHash: r.perceptual_hash,
+        aiModelVersion: r.ai_model_version,
+        confidenceScore: r.confidence_score,
+        eventType: r.event_type,
+        clipCloudURI: r.clip_cloud_uri,
+        status: r.status
+      }))
+    });
 
   } catch (error) {
     console.error('Logs error:', error);
