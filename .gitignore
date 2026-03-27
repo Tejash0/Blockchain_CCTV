@@ -4,6 +4,8 @@ node_modules
 CLAUDE.md
 docs
 test_videos
+review
+cloud-storage
 # Hardhat files
 cache/
 artifacts/

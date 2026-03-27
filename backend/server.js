@@ -66,8 +66,15 @@ const storage = multer.diskStorage({
   }
 });
 
+// Disk storage — for /api/record (persists file, triggers AI pipeline)
 const upload = multer({
   storage: storage,
+  limits: { fileSize: 500 * 1024 * 1024 }
+});
+
+// Memory storage — for /api/verify (never writes to disk, no AI trigger, no clip/report generated)
+const uploadMemory = multer({
+  storage: multer.memoryStorage(),
   limits: { fileSize: 500 * 1024 * 1024 }
 });
 
@@ -217,6 +224,49 @@ function k2aHammingDistance(hash1, hash2) {
 }
 
 /**
+ * Classify the type of tampering based on perceptual Hamming distance and file size change.
+ * Called when SHA-256 does not match (file is not the original).
+ */
+function analyzeTamperType(hammingDist, uploadedSize, storedSize) {
+  const sizeDiffRatio = (storedSize && storedSize > 0)
+    ? Math.abs(uploadedSize - storedSize) / storedSize
+    : null;
+
+  const sizeInfo = sizeDiffRatio !== null ? {
+    uploadedBytes: uploadedSize,
+    originalBytes: storedSize,
+    changePercent: Math.round(sizeDiffRatio * 100),
+    direction: uploadedSize > storedSize ? 'larger' : 'smaller'
+  } : null;
+
+  if (hammingDist === null) {
+    return { type: 'unknown', severity: 'unknown', description: 'No perceptual hash stored — cannot classify edit type', sizeInfo };
+  }
+  if (hammingDist === 0) {
+    if (sizeDiffRatio !== null && sizeDiffRatio > 0.05) {
+      return { type: 'reencoded', severity: 'low', description: 'Content identical but re-encoded — codec, container, or bitrate changed', sizeInfo };
+    }
+    return { type: 'metadata_modified', severity: 'low', description: 'Video frames unchanged — only metadata, timestamps, or container tags modified', sizeInfo };
+  }
+  if (hammingDist <= 8) {
+    if (sizeDiffRatio !== null && sizeDiffRatio > 0.3) {
+      return { type: 'quality_degradation', severity: 'low', description: 'Video heavily compressed or downsampled — significant quality loss with minor visual change', sizeInfo };
+    }
+    return { type: 'visual_adjustment', severity: 'low', description: 'Minor visual edit — brightness, contrast, color grading, slight zoom or crop applied', sizeInfo };
+  }
+  if (hammingDist <= 30) {
+    return { type: 'overlay_or_filter', severity: 'medium', description: 'Overlay, watermark, burned subtitle, or visual filter applied on top of original content', sizeInfo };
+  }
+  if (hammingDist <= 80) {
+    return { type: 'content_splice', severity: 'high', description: 'Significant content modification — footage cut, spliced, or a major section replaced', sizeInfo };
+  }
+  if (hammingDist <= 180) {
+    return { type: 'major_alteration', severity: 'critical', description: 'Major content replacement — only partial original footage remains', sizeInfo };
+  }
+  return { type: 'unrelated_content', severity: 'critical', description: 'Completely different video — no significant similarity to any recorded evidence', sizeInfo };
+}
+
+/**
  * Copy clip to cloud storage
  */
 function storeClip(sourcePath, videoHash) {
@@ -323,11 +373,26 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
 
     } catch (blockchainError) {
       console.error('Blockchain error:', blockchainError.message);
-      updateEvidenceFailed.run(videoHash);
 
-      if (blockchainError.message.includes('Evidence already exists')) {
-        return res.status(409).json({ success: false, error: 'Evidence already exists on blockchain' });
-      }
+      // Polygon Amoy doesn't return revert strings reliably — check chain directly
+      // before marking as failed, in case the hash is already there
+      try {
+        const onChain = await contract.verifyEvidence(videoHash);
+        if (onChain.exists) {
+          console.log(`Hash already on blockchain — syncing SQL to confirmed`);
+          updateEvidenceConfirmed.run(null, Number(onChain.loggedAt), wallet.address, videoHash);
+          return res.status(409).json({
+            success: false,
+            alreadyOnChain: true,
+            error: 'Evidence already exists on blockchain',
+            videoHash,
+            cameraId: onChain.cameraId,
+            timestamp: Number(onChain.timestamp)
+          });
+        }
+      } catch (_) { /* verifyEvidence failed — fall through */ }
+
+      updateEvidenceFailed.run(videoHash);
       return res.status(500).json({ success: false, error: 'Failed to record on blockchain: ' + blockchainError.message });
     }
 
@@ -339,20 +404,43 @@ app.post('/api/record', upload.single('video'), async (req, res) => {
 
 /**
  * POST /api/verify
+ * Uses memory storage — file never touches disk, no AI pipeline triggered.
  */
-app.post('/api/verify', upload.single('video'), async (req, res) => {
+app.post('/api/verify', uploadMemory.single('video'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ verified: false, error: 'No video file provided' });
     }
 
-    const fileBuffer = fs.readFileSync(req.file.path);
+    // Buffer lives in memory only — no disk write, no clip stored
+    const fileBuffer = req.file.buffer;
     const videoHash = calculateHash(fileBuffer);
-    // Compute K2A perceptual hash of the uploaded file for content comparison
     const uploadedPerceptualHash = calculatePerceptualHash(fileBuffer);
     console.log(`Verifying evidence: hash=${videoHash}`);
 
-    fs.unlinkSync(req.file.path);
+    // Call AI service for Gemini forensic report on the uploaded video
+    let geminiReport = null;
+    try {
+      const filename = req.file.originalname || 'verify.mp4';
+      const mimetype = req.file.mimetype || 'video/mp4';
+      const formData = new FormData();
+      // Use File (Node.js 20+) for correct Content-Disposition with filename
+      formData.append('video', new File([fileBuffer], filename, { type: mimetype }));
+      formData.append('camera_id', 'VERIFY');
+      formData.append('event_type', 'verification');
+      formData.append('confidence', '1.0');
+      console.log(`Sending video to AI service for Gemini analysis (${fileBuffer.length} bytes)...`);
+      const aiRes = await fetch('http://localhost:8000/api/ai/analyze', { method: 'POST', body: formData });
+      if (aiRes.ok) {
+        geminiReport = await aiRes.json();
+        console.log(`Gemini report received: severity=${geminiReport.severity}`);
+      } else {
+        const errText = await aiRes.text();
+        console.error(`AI service returned ${aiRes.status}: ${errText}`);
+      }
+    } catch (aiErr) {
+      console.error(`AI service unreachable or failed: ${aiErr.message}`);
+    }
 
     const cachedEvidence = getEvidenceByHash.get(videoHash);
 
@@ -374,6 +462,7 @@ app.post('/api/verify', upload.single('video'), async (req, res) => {
           source: cachedEvidence ? 'cache+blockchain' : 'blockchain',
           k2a_hamming_distance: hammingDist,
           k2a_verdict: k2aVerdict,
+          gemini_report: geminiReport,
           evidence: {
             videoHash: evidence.videoHash,
             cameraId: evidence.cameraId,
@@ -405,12 +494,41 @@ app.post('/api/verify', upload.single('video'), async (req, res) => {
 
         return res.json(responseData);
       } else {
+        // Hash not on blockchain — scan SQL for closest perceptual match to classify tampering
+        if (cachedEvidence && cachedEvidence.status === 'pending') {
+          return res.json({ verified: false, videoHash, message: 'Evidence found in cache but not yet confirmed on blockchain' });
+        }
+
+        const confirmedRecords = db.prepare(
+          `SELECT video_hash, camera_id, timestamp, perceptual_hash, file_size FROM evidence_log
+           WHERE perceptual_hash IS NOT NULL AND status = 'confirmed'`
+        ).all();
+
+        let closestMatch = null;
+        let minHamming = Infinity;
+        for (const record of confirmedRecords) {
+          const dist = k2aHammingDistance(record.perceptual_hash, uploadedPerceptualHash);
+          if (dist !== null && dist < minHamming) { minHamming = dist; closestMatch = record; }
+        }
+
+        const tamperAnalysis = closestMatch
+          ? analyzeTamperType(minHamming, fileBuffer.length, closestMatch.file_size)
+          : analyzeTamperType(null, fileBuffer.length, null);
+
         return res.json({
           verified: false,
           videoHash,
-          message: cachedEvidence && cachedEvidence.status === 'pending'
-            ? 'Evidence found in cache but not yet confirmed on blockchain'
-            : 'Evidence not found on blockchain'
+          tamperAnalysis,
+          gemini_report: geminiReport,
+          closestMatch: closestMatch ? {
+            videoHash: closestMatch.video_hash,
+            cameraId: closestMatch.camera_id,
+            timestamp: closestMatch.timestamp,
+            hammingDistance: minHamming
+          } : null,
+          message: closestMatch && minHamming <= 180
+            ? `Tampered version of recorded evidence detected — ${tamperAnalysis.type}`
+            : 'No matching evidence found on blockchain'
         });
       }
 
@@ -516,6 +634,63 @@ app.get('/api/logs', async (req, res) => {
     } catch (dbError) {
       return res.status(500).json({ success: false, error: 'Failed to fetch logs: ' + error.message });
     }
+  }
+});
+
+/**
+ * POST /api/cleanup
+ * Deletes all video and clip files not referenced by any DB record.
+ */
+app.post('/api/cleanup', (req, res) => {
+  try {
+    const records = db.prepare('SELECT file_path, clip_cloud_uri FROM evidence_log').all();
+
+    const referencedVideos = new Set();
+    const referencedClips = new Set();
+
+    for (const r of records) {
+      if (r.file_path) referencedVideos.add(path.resolve(r.file_path));
+      if (r.clip_cloud_uri) {
+        // clip_cloud_uri format: "local://cloud-storage/clips/filename.mp4"
+        const relative = r.clip_cloud_uri.replace('local://', '');
+        referencedClips.add(path.resolve(__dirname, '..', relative));
+      }
+    }
+
+    let deletedVideos = 0, deletedClips = 0;
+    const deletedList = [];
+
+    if (fs.existsSync(VIDEOS_DIR)) {
+      for (const file of fs.readdirSync(VIDEOS_DIR)) {
+        const fullPath = path.join(VIDEOS_DIR, file);
+        if (!referencedVideos.has(fullPath)) {
+          fs.unlinkSync(fullPath);
+          deletedVideos++;
+          deletedList.push(`videos/${file}`);
+        }
+      }
+    }
+
+    if (fs.existsSync(CLIPS_DIR)) {
+      for (const file of fs.readdirSync(CLIPS_DIR)) {
+        const fullPath = path.join(CLIPS_DIR, file);
+        if (!referencedClips.has(fullPath)) {
+          fs.unlinkSync(fullPath);
+          deletedClips++;
+          deletedList.push(`clips/${file}`);
+        }
+      }
+    }
+
+    console.log(`Cleanup: deleted ${deletedVideos} videos, ${deletedClips} clips`);
+    return res.json({
+      success: true,
+      deleted: { videos: deletedVideos, clips: deletedClips, files: deletedList },
+      retained: { videos: referencedVideos.size, clips: referencedClips.size }
+    });
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 

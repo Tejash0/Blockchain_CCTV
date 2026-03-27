@@ -5,9 +5,11 @@ FastAPI server for real-time video analysis and incident detection
 import asyncio
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import os
+import tempfile
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import numpy as np
@@ -347,6 +349,54 @@ async def list_recordings():
 
     recordings.sort(key=lambda x: x["created"], reverse=True)
     return {"recordings": recordings}
+
+
+@app.post("/api/ai/analyze")
+async def analyze_video(
+    video: UploadFile = File(...),
+    camera_id: str = Form("VERIFY"),
+    event_type: str = Form("verification"),
+    confidence: float = Form(1.0)
+):
+    """
+    Analyze an uploaded video file with Gemini and return a forensic report.
+    Used by the backend verify endpoint — does NOT store anything.
+    """
+    if not state.report_generator:
+        raise HTTPException(status_code=503, detail="Report generator not initialized")
+
+    # Write upload to a temp file (cv2 needs a path, not a buffer)
+    suffix = os.path.splitext(video.filename or "video.mp4")[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await video.read())
+        tmp_path = tmp.name
+
+    try:
+        import hashlib, time
+        content = open(tmp_path, "rb").read()
+        video_hash = "0x" + hashlib.sha256(content).hexdigest()
+
+        report = state.report_generator.generate_report(
+            video_path=tmp_path,
+            video_hash=video_hash,
+            camera_id=camera_id,
+            timestamp=time.time(),
+            event_type=event_type,
+            confidence=confidence
+        )
+
+        # Save report to cloud-storage/reports/
+        reports_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'cloud-storage', 'reports'
+        )
+        state.report_generator.save_report(report, reports_dir)
+
+        return JSONResponse(content=report.to_dict())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+    finally:
+        os.unlink(tmp_path)
 
 
 # WebSocket endpoint
