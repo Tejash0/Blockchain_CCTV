@@ -323,17 +323,21 @@ async def start_detection(request: StartDetectionRequest = None):
 
 @app.post("/api/ai/stop")
 async def stop_detection():
-    """Stop detection (keeps stream running)."""
+    """Stop detection (keeps stream running). Clears buffer."""
     state.is_detecting = False
+    if state.buffer:
+        state.buffer.clear()
     return {"status": "stopped"}
 
 
 @app.post("/api/ai/stop-stream")
 async def stop_stream():
-    """Stop video stream completely."""
+    """Stop video stream completely. Clears buffer."""
     state.is_detecting = False
     if state.processor:
         state.processor.stop()
+    if state.buffer:
+        state.buffer.clear()
     return {"status": "stream_stopped"}
 
 
