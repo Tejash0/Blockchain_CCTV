@@ -7,7 +7,6 @@ function Verify() {
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [hash, setHash] = useState(null)
-  const [pHash, setPHash] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef(null)
 
@@ -19,38 +18,13 @@ function Verify() {
     return '0x' + hashHex
   }
 
-  const calculatePerceptualHash = async (file) => {
-    const buffer = await file.arrayBuffer()
-    const uint8 = new Uint8Array(buffer)
-    const sampleSize = 4096
-    const numSamples = 16
-    const step = Math.max(1, Math.floor(uint8.length / numSamples))
-    const chunks = []
-    for (let i = 0; i < numSamples; i++) {
-      const offset = Math.min(i * step, uint8.length - sampleSize)
-      if (offset >= 0 && offset + sampleSize <= uint8.length) {
-        chunks.push(uint8.slice(offset, offset + sampleSize))
-      }
-    }
-    const combined = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0))
-    let pos = 0
-    for (const chunk of chunks) { combined.set(chunk, pos); pos += chunk.length }
-    const hashBuffer = await crypto.subtle.digest('SHA-256', combined)
-    const hashArray = Array.from(new Uint8Array(hashBuffer))
-    return '0x' + hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
-  }
-
   const processFile = async (selectedFile) => {
     setFile(selectedFile)
     setResult(null)
     setError(null)
     try {
-      const [calculatedHash, calculatedPHash] = await Promise.all([
-        calculateHash(selectedFile),
-        calculatePerceptualHash(selectedFile)
-      ])
+      const calculatedHash = await calculateHash(selectedFile)
       setHash(calculatedHash)
-      setPHash(calculatedPHash)
     } catch (err) {
       console.error('Hash calculation error:', err)
     }
@@ -88,7 +62,7 @@ function Verify() {
   }
 
   const handleReset = () => {
-    setFile(null); setHash(null); setPHash(null); setResult(null); setError(null)
+    setFile(null); setHash(null); setResult(null); setError(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -139,17 +113,10 @@ function Verify() {
 
       {/* Hash Preview */}
       {hash && (
-        <div className="mt-4 p-4 bg-gray-50 rounded-lg space-y-3">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">File SHA-256 Hash (Content Integrity)</label>
-            <code className="block text-xs text-gray-600 break-all">{hash}</code>
-          </div>
-          {pHash && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Perceptual Hash (Visual Similarity)</label>
-              <code className="block text-xs text-gray-600 break-all">{pHash}</code>
-            </div>
-          )}
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+          <label className="block text-sm font-medium text-gray-700 mb-1">File SHA-256 Hash</label>
+          <code className="block text-xs text-gray-600 break-all">{hash}</code>
+          <p className="text-xs text-gray-400 mt-1">K2A perceptual hash is computed server-side on video frames — result shown after verification.</p>
         </div>
       )}
 
@@ -212,8 +179,19 @@ function Verify() {
               </div>
               {!isZeroHash(result.evidence.perceptualHash) && (
                 <div>
-                  <dt className="text-sm font-medium text-gray-500">Perceptual Hash (pHash)</dt>
+                  <dt className="text-sm font-medium text-gray-500">K2A Hash (stored on-chain)</dt>
                   <dd className="text-sm text-gray-900 break-all"><code>{truncateHash(result.evidence.perceptualHash)}</code></dd>
+                </div>
+              )}
+              {result.k2a_verdict && (
+                <div>
+                  <dt className="text-sm font-medium text-gray-500">K2A Content Verdict</dt>
+                  <dd className={`text-sm font-semibold ${result.k2a_verdict === 'content_authentic' ? 'text-green-700' : 'text-red-700'}`}>
+                    {result.k2a_verdict === 'content_authentic' ? 'Content Authentic' : 'Content Modified'}
+                    {result.k2a_hamming_distance != null && (
+                      <span className="ml-2 font-normal text-gray-500">({result.k2a_hamming_distance} bit{result.k2a_hamming_distance !== 1 ? 's' : ''} difference)</span>
+                    )}
+                  </dd>
                 </div>
               )}
               {!isZeroHash(result.evidence.reportHash) && (

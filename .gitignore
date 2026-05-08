@@ -2,7 +2,8 @@ node_modules
 .claude
 .env
 CLAUDE.md
-docs
+/docs/*
+/.planning/*
 test_videos
 review
 cloud-storage
